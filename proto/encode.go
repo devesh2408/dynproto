@@ -227,7 +227,7 @@ type Marshaler interface {
 
 // Marshal takes the protocol buffer
 // and encodes it into the wire format, returning the data.
-func Marshal(pb Message) ([]byte, error) {
+func Marshal(pb interface{}) ([]byte, error) {
 	// Can the object marshal itself?
 	if m, ok := pb.(Marshaler); ok {
 		return m.Marshal()
@@ -258,7 +258,7 @@ func (p *Buffer) EncodeMessage(pb Message) error {
 // Marshal takes the protocol buffer
 // and encodes it into the wire format, writing the result to the
 // Buffer.
-func (p *Buffer) Marshal(pb Message) error {
+func (p *Buffer) Marshal(pb interface{}) error {
 	// Can the object marshal itself?
 	if m, ok := pb.(Marshaler); ok {
 		data, err := m.Marshal()

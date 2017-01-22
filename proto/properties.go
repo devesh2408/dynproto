@@ -790,7 +790,7 @@ func propByIndex(t reflect.Type, x []int) *Properties {
 }
 
 // Get the address and type of a pointer to a struct from an interface.
-func getbase(pb Message) (t reflect.Type, b structPointer, err error) {
+func getbase(pb interface{}) (t reflect.Type, b structPointer, err error) {
 	if pb == nil {
 		err = ErrNil
 		return

@@ -436,7 +436,7 @@ func (p *Buffer) DecodeGroup(pb Message) error {
 // unpredictable.
 //
 // Unlike proto.Unmarshal, this does not reset pb before starting to unmarshal.
-func (p *Buffer) Unmarshal(pb Message) error {
+func (p *Buffer) Unmarshal(pb interface{}) error {
 	// If the object can unmarshal itself, let it.
 	if u, ok := pb.(Unmarshaler); ok {
 		err := u.Unmarshal(p.buf[p.index:])
