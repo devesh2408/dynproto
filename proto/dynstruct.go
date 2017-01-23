@@ -4,7 +4,6 @@ package proto
 
 import (
 	"reflect"
-	"strings"
 
 	"github.com/golang/protobuf/protoc-gen-go/descriptor"
 )
@@ -53,35 +52,37 @@ func DynType(desc *descriptor.FieldDescriptorProto) reflect.Type {
 	}
 }
 
-func ToCamelCase(name string) string {
-	tokens := strings.Split(name, "_")
-	for i, tok := range tokens {
-		tokens[i] = strings.Title(tok)
-	}
-	return strings.Join(tokens, "")
-}
-
-func DynField(file_desc *descriptor.FileDescriptorProto, field *descriptor.FieldDescriptorProto) reflect.StructField {
-	// gen := NewGenerator()
-	/* gen.
-	_, wire := genFieldType(file_desc, field)
-	tag := genFieldTag(file_desc, field, wire) */
-	tag := ""
-	panic("tag and type above")
+func DynField(gen *Generator, message *Descriptor, field *descriptor.FieldDescriptorProto) reflect.StructField {
+	typename, wire := gen.GoType(message, field)
+	tag := gen.goTag(message, field, wire)
 	return reflect.StructField{
-		Name: ToCamelCase(*field.Name),
+		Name: CamelCase(*field.Name),
 		Type: DynType(field),
 		Tag:  reflect.StructTag("protobuf:" + tag),
 	}
 }
 
-// see Generator.generateMessage. Be warned, it's long.
+// this runs the top half of main.go from the generator package so we can access gen.GoType and gen.goTag for fields
+func makeSyntheticGenerator(desc *descriptor.FileDescriptorProto) *Generator {
+	gen := NewGenerator()
+	fname := "synthetic"
+	gen.Request.FileToGenerate = []string{fname}
+	desc.Name = &fname
+	gen.Request.ProtoFile = []*descriptor.FileDescriptorProto{desc}
+	gen.WrapTypes()
+	gen.SetPackageNames()
+	gen.BuildTypeNameMap()
+	return gen
+}
+
+// warning: we set FileDescriptorProto.Name
 func DynStruct(desc *descriptor.FileDescriptorProto) []reflect.Type {
 	structs := make([]reflect.Type, 0, len(desc.MessageType))
-	for _, message := range desc.MessageType {
+	gen := makeSyntheticGenerator(desc)
+	for _, message := range gen.allFiles[0].desc {
 		fields := make([]reflect.StructField, 0, len(message.Field))
 		for _, field := range message.Field {
-			fields = append(fields, DynField(desc, field))
+			fields = append(fields, DynField(gen, message, field))
 		}
 		structs = append(structs, reflect.StructOf(fields))
 	}

@@ -88,14 +88,14 @@ func NewGenerator() *Generator {
 func (g *Generator) Error(err error, msgs ...string) {
 	s := strings.Join(msgs, " ") + ":" + err.Error()
 	log.Print("protoc-gen-go: error:", s)
-	panic("")
+	panic("Generator.Error")
 }
 
 // Fail reports a problem and exits the program.
 func (g *Generator) Fail(msgs ...string) {
 	s := strings.Join(msgs, " ")
 	log.Print("protoc-gen-go: error:", s)
-	panic("")
+	panic("Generator.Fail")
 }
 
 // CommandLineParameters breaks the comma-separated list of key=value pairs
