@@ -8,48 +8,14 @@ import (
 	"github.com/golang/protobuf/protoc-gen-go/descriptor"
 )
 
-func DynType(desc *descriptor.FieldDescriptorProto) reflect.Type {
-	switch *desc.Type.Enum() {
-	case descriptor.FieldDescriptorProto_TYPE_DOUBLE:
-		return reflect.TypeOf(float64(0))
-	case descriptor.FieldDescriptorProto_TYPE_FLOAT:
-		return reflect.TypeOf(float32(0))
-	case descriptor.FieldDescriptorProto_TYPE_INT64:
-		return reflect.TypeOf(int64(0))
-	case descriptor.FieldDescriptorProto_TYPE_UINT64:
-		return reflect.TypeOf(uint64(0))
-	case descriptor.FieldDescriptorProto_TYPE_INT32:
-		return reflect.TypeOf(int32(0))
-	case descriptor.FieldDescriptorProto_TYPE_FIXED64:
-		fallthrough
-	case descriptor.FieldDescriptorProto_TYPE_FIXED32:
-		panic("fixed")
-	case descriptor.FieldDescriptorProto_TYPE_BOOL:
-		return reflect.TypeOf(true)
-	case descriptor.FieldDescriptorProto_TYPE_STRING:
-		return reflect.TypeOf("")
-	case descriptor.FieldDescriptorProto_TYPE_GROUP:
-		panic("group")
-	case descriptor.FieldDescriptorProto_TYPE_MESSAGE:
-		panic("submessage")
-	case descriptor.FieldDescriptorProto_TYPE_BYTES:
-		return reflect.TypeOf([]byte(""))
-	case descriptor.FieldDescriptorProto_TYPE_UINT32:
-		return reflect.TypeOf(uint32(0))
-	case descriptor.FieldDescriptorProto_TYPE_ENUM:
-		// dec, cast = "b.DecodeVarint()", fieldTypes[field]
-		panic("enum")
-	case descriptor.FieldDescriptorProto_TYPE_SFIXED32:
-		fallthrough
-	case descriptor.FieldDescriptorProto_TYPE_SFIXED64:
-		panic("fixed")
-	case descriptor.FieldDescriptorProto_TYPE_SINT32:
-		return reflect.TypeOf(int32(0))
-	case descriptor.FieldDescriptorProto_TYPE_SINT64:
-		return reflect.TypeOf(int64(0))
-	default:
-		panic("unk type")
-	}
+var typeNames = map[string]reflect.Type{
+	"int32":   reflect.TypeOf(int32(0)),
+	"int64":   reflect.TypeOf(int64(0)),
+	"float32": reflect.TypeOf(float32(0)),
+	"float64": reflect.TypeOf(float64(0)),
+	"bool":    reflect.TypeOf(true),
+	"string":  reflect.TypeOf(""),
+	"[]byte":  reflect.TypeOf([]byte("")),
 }
 
 func DynField(gen *Generator, message *Descriptor, field *descriptor.FieldDescriptorProto) reflect.StructField {
@@ -57,7 +23,7 @@ func DynField(gen *Generator, message *Descriptor, field *descriptor.FieldDescri
 	tag := gen.goTag(message, field, wire)
 	return reflect.StructField{
 		Name: CamelCase(*field.Name),
-		Type: DynType(field),
+		Type: typeNames[typename],
 		Tag:  reflect.StructTag("protobuf:" + tag),
 	}
 }
