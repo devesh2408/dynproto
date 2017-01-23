@@ -62,8 +62,12 @@ func ToCamelCase(name string) string {
 }
 
 func DynField(file_desc *descriptor.FileDescriptorProto, field *descriptor.FieldDescriptorProto) reflect.StructField {
+	// gen := NewGenerator()
+	/* gen.
 	_, wire := genFieldType(file_desc, field)
-	tag := genFieldTag(file_desc, field, wire)
+	tag := genFieldTag(file_desc, field, wire) */
+	tag := ""
+	panic("tag and type above")
 	return reflect.StructField{
 		Name: ToCamelCase(*field.Name),
 		Type: DynType(field),

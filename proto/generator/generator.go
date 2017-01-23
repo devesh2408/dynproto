@@ -1,15 +1,23 @@
-// copied from protoc-gen-go/generator.go
-
 package proto
 
 import (
+	"bufio"
+	"bytes"
+	"compress/gzip"
 	"fmt"
+	"go/parser"
+	"go/printer"
+	token_ "go/token"
 	"log"
+	"path"
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
+	"github.com/golang/protobuf/proto"
 	"github.com/golang/protobuf/protoc-gen-go/descriptor"
+	plugin "github.com/golang/protobuf/protoc-gen-go/plugin"
 )
 
 // generatedCodeVersion indicates a version of the generated code.
@@ -18,7 +26,7 @@ import (
 // a constant, proto.ProtoPackageIsVersionN (where N is generatedCodeVersion).
 const generatedCodeVersion = 2
 
-/* // A Plugin provides functionality to add to the output during Go code generation,
+// A Plugin provides functionality to add to the output during Go code generation,
 // such as to produce RPC stubs.
 type Plugin interface {
 	// Name identifies the plugin.
@@ -40,470 +48,9 @@ var plugins []Plugin
 // It is typically called during initialization.
 func RegisterPlugin(p Plugin) {
 	plugins = append(plugins, p)
-} */
-
-// Each type we import as a protocol buffer (other than FileDescriptorProto) needs
-// a pointer to the FileDescriptorProto that represents it.  These types achieve that
-// wrapping by placing each Proto inside a struct with the pointer to its File. The
-// structs have the same names as their contents, with "Proto" removed.
-// FileDescriptor is used to store the things that it points to.
-
-// The file and package name method are common to messages and enums.
-type common struct {
-	file *descriptor.FileDescriptorProto // File this object comes from.
 }
 
-// PackageName is name in the package clause in the generated file.
-// func (c *common) PackageName() string { return uniquePackageOf(c.file) }
-
-func (c *common) File() *descriptor.FileDescriptorProto { return c.file }
-
-func fileIsProto3(file *descriptor.FileDescriptorProto) bool {
-	return file.GetSyntax() == "proto3"
-}
-
-func (c *common) proto3() bool { return fileIsProto3(c.file) }
-
-// Descriptor represents a protocol buffer message.
-type Descriptor struct {
-	common
-	*descriptor.DescriptorProto
-	parent   *Descriptor            // The containing message, if any.
-	nested   []*Descriptor          // Inner messages, if any.
-	enums    []*EnumDescriptor      // Inner enums, if any.
-	ext      []*ExtensionDescriptor // Extensions, if any.
-	typename []string               // Cached typename vector.
-	index    int                    // The index into the container, whether the file or another message.
-	path     string                 // The SourceCodeInfo path as comma-separated integers.
-	group    bool
-}
-
-// TypeName returns the elements of the dotted type name.
-// The package name is not part of this name.
-func (d *Descriptor) TypeName() []string {
-	if d.typename != nil {
-		return d.typename
-	}
-	n := 0
-	for parent := d; parent != nil; parent = parent.parent {
-		n++
-	}
-	s := make([]string, n, n)
-	for parent := d; parent != nil; parent = parent.parent {
-		n--
-		s[n] = parent.GetName()
-	}
-	d.typename = s
-	return s
-}
-
-// EnumDescriptor describes an enum. If it's at top level, its parent will be nil.
-// Otherwise it will be the descriptor of the message in which it is defined.
-type EnumDescriptor struct {
-	common
-	*descriptor.EnumDescriptorProto
-	parent   *Descriptor // The containing message, if any.
-	typename []string    // Cached typename vector.
-	index    int         // The index into the container, whether the file or a message.
-	path     string      // The SourceCodeInfo path as comma-separated integers.
-}
-
-// TypeName returns the elements of the dotted type name.
-// The package name is not part of this name.
-func (e *EnumDescriptor) TypeName() (s []string) {
-	if e.typename != nil {
-		return e.typename
-	}
-	name := e.GetName()
-	if e.parent == nil {
-		s = make([]string, 1)
-	} else {
-		pname := e.parent.TypeName()
-		s = make([]string, len(pname)+1)
-		copy(s, pname)
-	}
-	s[len(s)-1] = name
-	e.typename = s
-	return s
-}
-
-// Everything but the last element of the full type name, CamelCased.
-// The values of type Foo.Bar are call Foo_value1... not Foo_Bar_value1... .
-func (e *EnumDescriptor) prefix() string {
-	if e.parent == nil {
-		// If the enum is not part of a message, the prefix is just the type name.
-		return CamelCase(*e.Name) + "_"
-	}
-	typeName := e.TypeName()
-	return CamelCaseSlice(typeName[0:len(typeName)-1]) + "_"
-}
-
-// The integer value of the named constant in this enumerated type.
-func (e *EnumDescriptor) integerValueAsString(name string) string {
-	for _, c := range e.Value {
-		if c.GetName() == name {
-			return fmt.Sprint(c.GetNumber())
-		}
-	}
-	log.Fatal("cannot find value for enum constant")
-	return ""
-}
-
-// ExtensionDescriptor describes an extension. If it's at top level, its parent will be nil.
-// Otherwise it will be the descriptor of the message in which it is defined.
-type ExtensionDescriptor struct {
-	common
-	*descriptor.FieldDescriptorProto
-	parent *Descriptor // The containing message, if any.
-}
-
-// TypeName returns the elements of the dotted type name.
-// The package name is not part of this name.
-func (e *ExtensionDescriptor) TypeName() (s []string) {
-	name := e.GetName()
-	if e.parent == nil {
-		// top-level extension
-		s = make([]string, 1)
-	} else {
-		pname := e.parent.TypeName()
-		s = make([]string, len(pname)+1)
-		copy(s, pname)
-	}
-	s[len(s)-1] = name
-	return s
-}
-
-// DescName returns the variable name used for the generated descriptor.
-func (e *ExtensionDescriptor) DescName() string {
-	// The full type name.
-	typeName := e.TypeName()
-	// Each scope of the extension is individually CamelCased, and all are joined with "_" with an "E_" prefix.
-	for i, s := range typeName {
-		typeName[i] = CamelCase(s)
-	}
-	return "E_" + strings.Join(typeName, "_")
-}
-
-// ImportedDescriptor describes a type that has been publicly imported from another file.
-/* type ImportedDescriptor struct {
-	common
-	o Object
-}
-
-func (id *ImportedDescriptor) TypeName() []string { return id.o.TypeName() } */
-
-// FileDescriptor describes an protocol buffer descriptor file (.proto).
-// It includes slices of all the messages and enums defined within it.
-// Those slices are constructed by WrapTypes.
-/* type FileDescriptor struct {
-	*descriptor.FileDescriptorProto
-	desc []*Descriptor          // All the messages defined in this file.
-	enum []*EnumDescriptor      // All the enums defined in this file.
-	ext  []*ExtensionDescriptor // All the top-level extensions defined in this file.
-	imp  []*ImportedDescriptor  // All types defined in files publicly imported by this file.
-
-	// Comments, stored as a map of path (comma-separated integers) to the comment.
-	comments map[string]*descriptor.SourceCodeInfo_Location
-
-	// The full list of symbols that are exported,
-	// as a map from the exported object to its symbols.
-	// This is used for supporting public imports.
-	exported map[Object][]symbol
-
-	index int // The index of this file in the list of files to generate code for
-
-	proto3 bool // whether to generate proto3 code for this file
-}
-
-// PackageName is the package name we'll use in the generated code to refer to this file.
-func (d *FileDescriptor) PackageName() string { return uniquePackageOf(d.FileDescriptorProto) }
-
-// VarName is the variable name we'll use in the generated code to refer
-// to the compressed bytes of this descriptor. It is not exported, so
-// it is only valid inside the generated package.
-func (d *FileDescriptor) VarName() string { return fmt.Sprintf("fileDescriptor%d", d.index) }
-
-// goPackageOption interprets the file's go_package option.
-// If there is no go_package, it returns ("", "", false).
-// If there's a simple name, it returns ("", pkg, true).
-// If the option implies an import path, it returns (impPath, pkg, true).
-func (d *FileDescriptor) goPackageOption() (impPath, pkg string, ok bool) {
-	pkg = d.GetOptions().GetGoPackage()
-	if pkg == "" {
-		return
-	}
-	ok = true
-	// The presence of a slash implies there's an import path.
-	slash := strings.LastIndex(pkg, "/")
-	if slash < 0 {
-		return
-	}
-	impPath, pkg = pkg, pkg[slash+1:]
-	// A semicolon-delimited suffix overrides the package name.
-	sc := strings.IndexByte(impPath, ';')
-	if sc < 0 {
-		return
-	}
-	impPath, pkg = impPath[:sc], impPath[sc+1:]
-	return
-}
-
-// goPackageName returns the Go package name to use in the
-// generated Go file.  The result explicit reports whether the name
-// came from an option go_package statement.  If explicit is false,
-// the name was derived from the protocol buffer's package statement
-// or the input file name.
-func (d *FileDescriptor) goPackageName() (name string, explicit bool) {
-	// Does the file have a "go_package" option?
-	if _, pkg, ok := d.goPackageOption(); ok {
-		return pkg, true
-	}
-
-	// Does the file have a package clause?
-	if pkg := d.GetPackage(); pkg != "" {
-		return pkg, false
-	}
-	// Use the file base name.
-	return baseName(d.GetName()), false
-}
-
-// goFileName returns the output name for the generated Go file.
-func (d *FileDescriptor) goFileName() string {
-	name := *d.Name
-	if ext := path.Ext(name); ext == ".proto" || ext == ".protodevel" {
-		name = name[:len(name)-len(ext)]
-	}
-	name += ".pb.go"
-
-	// Does the file have a "go_package" option?
-	// If it does, it may override the filename.
-	if impPath, _, ok := d.goPackageOption(); ok && impPath != "" {
-		// Replace the existing dirname with the declared import path.
-		_, name = path.Split(name)
-		name = path.Join(impPath, name)
-		return name
-	}
-
-	return name
-}
-
-func (d *FileDescriptor) addExport(obj Object, sym symbol) {
-	d.exported[obj] = append(d.exported[obj], sym)
-} */
-
-// symbol is an interface representing an exported Go symbol.
-/* type symbol interface {
-	// GenerateAlias should generate an appropriate alias
-	// for the symbol from the named package.
-	GenerateAlias(g *Generator, pkg string)
-} */
-
-type messageSymbol struct {
-	sym                         string
-	hasExtensions, isMessageSet bool
-	hasOneof                    bool
-	getters                     []getterSymbol
-}
-
-type getterSymbol struct {
-	name     string
-	typ      string
-	typeName string // canonical name in proto world; empty for proto.Message and similar
-	genType  bool   // whether typ contains a generated type (message/group/enum)
-}
-
-/* func (ms *messageSymbol) GenerateAlias(g *Generator, pkg string) {
-	remoteSym := pkg + "." + ms.sym
-
-	g.P("type ", ms.sym, " ", remoteSym)
-	g.P("func (m *", ms.sym, ") Reset() { (*", remoteSym, ")(m).Reset() }")
-	g.P("func (m *", ms.sym, ") String() string { return (*", remoteSym, ")(m).String() }")
-	g.P("func (*", ms.sym, ") ProtoMessage() {}")
-	if ms.hasExtensions {
-		g.P("func (*", ms.sym, ") ExtensionRangeArray() []", g.Pkg["proto"], ".ExtensionRange ",
-			"{ return (*", remoteSym, ")(nil).ExtensionRangeArray() }")
-		if ms.isMessageSet {
-			g.P("func (m *", ms.sym, ") Marshal() ([]byte, error) ",
-				"{ return (*", remoteSym, ")(m).Marshal() }")
-			g.P("func (m *", ms.sym, ") Unmarshal(buf []byte) error ",
-				"{ return (*", remoteSym, ")(m).Unmarshal(buf) }")
-		}
-	}
-	if ms.hasOneof {
-		// Oneofs and public imports do not mix well.
-		// We can make them work okay for the binary format,
-		// but they're going to break weirdly for text/JSON.
-		enc := "_" + ms.sym + "_OneofMarshaler"
-		dec := "_" + ms.sym + "_OneofUnmarshaler"
-		size := "_" + ms.sym + "_OneofSizer"
-		encSig := "(msg " + g.Pkg["proto"] + ".Message, b *" + g.Pkg["proto"] + ".Buffer) error"
-		decSig := "(msg " + g.Pkg["proto"] + ".Message, tag, wire int, b *" + g.Pkg["proto"] + ".Buffer) (bool, error)"
-		sizeSig := "(msg " + g.Pkg["proto"] + ".Message) int"
-		g.P("func (m *", ms.sym, ") XXX_OneofFuncs() (func", encSig, ", func", decSig, ", func", sizeSig, ", []interface{}) {")
-		g.P("return ", enc, ", ", dec, ", ", size, ", nil")
-		g.P("}")
-
-		g.P("func ", enc, encSig, " {")
-		g.P("m := msg.(*", ms.sym, ")")
-		g.P("m0 := (*", remoteSym, ")(m)")
-		g.P("enc, _, _, _ := m0.XXX_OneofFuncs()")
-		g.P("return enc(m0, b)")
-		g.P("}")
-
-		g.P("func ", dec, decSig, " {")
-		g.P("m := msg.(*", ms.sym, ")")
-		g.P("m0 := (*", remoteSym, ")(m)")
-		g.P("_, dec, _, _ := m0.XXX_OneofFuncs()")
-		g.P("return dec(m0, tag, wire, b)")
-		g.P("}")
-
-		g.P("func ", size, sizeSig, " {")
-		g.P("m := msg.(*", ms.sym, ")")
-		g.P("m0 := (*", remoteSym, ")(m)")
-		g.P("_, _, size, _ := m0.XXX_OneofFuncs()")
-		g.P("return size(m0)")
-		g.P("}")
-	}
-	for _, get := range ms.getters {
-
-		if get.typeName != "" {
-			g.RecordTypeUse(get.typeName)
-		}
-		typ := get.typ
-		val := "(*" + remoteSym + ")(m)." + get.name + "()"
-		if get.genType {
-			// typ will be "*pkg.T" (message/group) or "pkg.T" (enum)
-			// or "map[t]*pkg.T" (map to message/enum).
-			// The first two of those might have a "[]" prefix if it is repeated.
-			// Drop any package qualifier since we have hoisted the type into this package.
-			rep := strings.HasPrefix(typ, "[]")
-			if rep {
-				typ = typ[2:]
-			}
-			isMap := strings.HasPrefix(typ, "map[")
-			star := typ[0] == '*'
-			if !isMap { // map types handled lower down
-				typ = typ[strings.Index(typ, ".")+1:]
-			}
-			if star {
-				typ = "*" + typ
-			}
-			if rep {
-				// Go does not permit conversion between slice types where both
-				// element types are named. That means we need to generate a bit
-				// of code in this situation.
-				// typ is the element type.
-				// val is the expression to get the slice from the imported type.
-
-				ctyp := typ // conversion type expression; "Foo" or "(*Foo)"
-				if star {
-					ctyp = "(" + typ + ")"
-				}
-
-				g.P("func (m *", ms.sym, ") ", get.name, "() []", typ, " {")
-				g.In()
-				g.P("o := ", val)
-				g.P("if o == nil {")
-				g.In()
-				g.P("return nil")
-				g.Out()
-				g.P("}")
-				g.P("s := make([]", typ, ", len(o))")
-				g.P("for i, x := range o {")
-				g.In()
-				g.P("s[i] = ", ctyp, "(x)")
-				g.Out()
-				g.P("}")
-				g.P("return s")
-				g.Out()
-				g.P("}")
-				continue
-			}
-			if isMap {
-				// Split map[keyTyp]valTyp.
-				bra, ket := strings.Index(typ, "["), strings.Index(typ, "]")
-				keyTyp, valTyp := typ[bra+1:ket], typ[ket+1:]
-				// Drop any package qualifier.
-				// Only the value type may be foreign.
-				star := valTyp[0] == '*'
-				valTyp = valTyp[strings.Index(valTyp, ".")+1:]
-				if star {
-					valTyp = "*" + valTyp
-				}
-
-				typ := "map[" + keyTyp + "]" + valTyp
-				g.P("func (m *", ms.sym, ") ", get.name, "() ", typ, " {")
-				g.P("o := ", val)
-				g.P("if o == nil { return nil }")
-				g.P("s := make(", typ, ", len(o))")
-				g.P("for k, v := range o {")
-				g.P("s[k] = (", valTyp, ")(v)")
-				g.P("}")
-				g.P("return s")
-				g.P("}")
-				continue
-			}
-			// Convert imported type into the forwarding type.
-			val = "(" + typ + ")(" + val + ")"
-		}
-
-		g.P("func (m *", ms.sym, ") ", get.name, "() ", typ, " { return ", val, " }")
-	}
-
-}
-
-type enumSymbol struct {
-	name   string
-	proto3 bool // Whether this came from a proto3 file.
-}
-
-func (es enumSymbol) GenerateAlias(g *Generator, pkg string) {
-	s := es.name
-	g.P("type ", s, " ", pkg, ".", s)
-	g.P("var ", s, "_name = ", pkg, ".", s, "_name")
-	g.P("var ", s, "_value = ", pkg, ".", s, "_value")
-	g.P("func (x ", s, ") String() string { return (", pkg, ".", s, ")(x).String() }")
-	if !es.proto3 {
-		g.P("func (x ", s, ") Enum() *", s, "{ return (*", s, ")((", pkg, ".", s, ")(x).Enum()) }")
-		g.P("func (x *", s, ") UnmarshalJSON(data []byte) error { return (*", pkg, ".", s, ")(x).UnmarshalJSON(data) }")
-	}
-}
-
-type constOrVarSymbol struct {
-	sym  string
-	typ  string // either "const" or "var"
-	cast string // if non-empty, a type cast is required (used for enums)
-}
-
-func (cs constOrVarSymbol) GenerateAlias(g *Generator, pkg string) {
-	v := pkg + "." + cs.sym
-	if cs.cast != "" {
-		v = cs.cast + "(" + v + ")"
-	}
-	g.P(cs.typ, " ", cs.sym, " = ", v)
-}
-
-// Object is an interface abstracting the abilities shared by enums, messages, extensions and imported objects.
-type Object interface {
-	PackageName() string // The name we use in our output (a_b_c), possibly renamed for uniqueness.
-	TypeName() []string
-	File() *descriptor.FileDescriptorProto
-}
-
-// Each package name we generate must be unique. The package we're generating
-// gets its own name but every other package must have a unique name that does
-// not conflict in the code we generate.  These names are chosen globally (although
-// they don't have to be, it simplifies things to do them globally).
-func uniquePackageOf(fd *descriptor.FileDescriptorProto) string {
-	s, ok := uniquePackageName[fd]
-	if !ok {
-		log.Fatal("internal error: no package name defined for " + fd.GetName())
-	}
-	return s
-} */
-
-// Generator is the type whose methods generate the output, stored in the associated response structure.
-/* type Generator struct {
+type Generator struct {
 	*bytes.Buffer
 
 	Request  *plugin.CodeGeneratorRequest  // The input.
@@ -529,7 +76,7 @@ func uniquePackageOf(fd *descriptor.FileDescriptorProto) string {
 }
 
 // New creates a new generator and allocates the request and response protobufs.
-func New() *Generator {
+func NewGenerator() *Generator {
 	g := new(Generator)
 	g.Buffer = new(bytes.Buffer)
 	g.Request = new(plugin.CodeGeneratorRequest)
@@ -541,14 +88,14 @@ func New() *Generator {
 func (g *Generator) Error(err error, msgs ...string) {
 	s := strings.Join(msgs, " ") + ":" + err.Error()
 	log.Print("protoc-gen-go: error:", s)
-	os.Exit(1)
+	panic("")
 }
 
 // Fail reports a problem and exits the program.
 func (g *Generator) Fail(msgs ...string) {
 	s := strings.Join(msgs, " ")
 	log.Print("protoc-gen-go: error:", s)
-	os.Exit(1)
+	panic("")
 }
 
 // CommandLineParameters breaks the comma-separated list of key=value pairs
@@ -605,7 +152,7 @@ func (g *Generator) DefaultPackageName(obj Object) string {
 		return ""
 	}
 	return pkg + "."
-} */
+}
 
 // For each input file, the unique package name to use, underscored.
 var uniquePackageName = make(map[*descriptor.FileDescriptorProto]string)
@@ -617,7 +164,7 @@ var pkgNamesInUse = make(map[string]bool)
 // Create and remember a guaranteed unique package name for this file descriptor.
 // Pkg is the candidate name.  If f is nil, it's a builtin package like "proto" and
 // has no file descriptor.
-/* func RegisterUniquePackageName(pkg string, f *FileDescriptor) string {
+func RegisterUniquePackageName(pkg string, f *FileDescriptor) string {
 	// Convert dots to underscores before finding a unique alias.
 	pkg = strings.Map(badToUnderscore, pkg)
 
@@ -631,7 +178,7 @@ var pkgNamesInUse = make(map[string]bool)
 		uniquePackageName[f.FileDescriptorProto] = pkg
 	}
 	return pkg
-} */
+}
 
 var isGoKeyword = map[string]bool{
 	"break":       true,
@@ -663,7 +210,7 @@ var isGoKeyword = map[string]bool{
 
 // defaultGoPackage returns the package name to use,
 // derived from the import path of the package we're building code for.
-/* func (g *Generator) defaultGoPackage() string {
+func (g *Generator) defaultGoPackage() string {
 	p := g.PackageImportPath
 	if i := strings.LastIndex(p, "/"); i >= 0 {
 		p = p[i+1:]
@@ -773,8 +320,8 @@ func (g *Generator) WrapTypes() {
 			desc:                descs,
 			enum:                enums,
 			ext:                 exts,
-			exported:            make(map[Object][]symbol),
-			proto3:              fileIsProto3(f),
+			// exported:            make(map[Object][]symbol),
+			proto3: fileIsProto3(f),
 		}
 		extractComments(fd)
 		g.allFiles = append(g.allFiles, fd)
@@ -1072,10 +619,10 @@ func (g *Generator) Out() {
 	if len(g.indent) > 0 {
 		g.indent = g.indent[1:]
 	}
-} */
+}
 
 // GenerateAllFiles generates the output for all the files we're outputting.
-/* func (g *Generator) GenerateAllFiles() {
+func (g *Generator) GenerateAllFiles() {
 	// Initialize the plugins
 	for _, p := range plugins {
 		p.Init(g)
@@ -1099,17 +646,17 @@ func (g *Generator) Out() {
 			Content: proto.String(g.String()),
 		})
 	}
-} */
+}
 
-/* // Run all the plugins associated with the file.
+// Run all the plugins associated with the file.
 func (g *Generator) runPlugins(file *FileDescriptor) {
 	for _, p := range plugins {
 		p.Generate(file)
 	}
-} */
+}
 
 // FileOf return the FileDescriptor for this FileDescriptorProto.
-/* func (g *Generator) FileOf(fd *descriptor.FileDescriptorProto) *FileDescriptor {
+func (g *Generator) FileOf(fd *descriptor.FileDescriptorProto) *FileDescriptor {
 	for _, file := range g.allFiles {
 		if file.FileDescriptorProto == fd {
 			return file
@@ -1117,11 +664,11 @@ func (g *Generator) runPlugins(file *FileDescriptor) {
 	}
 	g.Fail("could not find file in table:", fd.GetName())
 	return nil
-} */
+}
 
 // Fill the response protocol buffer with the generated output for all the files we're
 // supposed to generate.
-/* func (g *Generator) generate(file *FileDescriptor) {
+func (g *Generator) generate(file *FileDescriptor) {
 	g.file = g.FileOf(file.FileDescriptorProto)
 	g.usedPackages = make(map[string]bool)
 
@@ -1168,7 +715,7 @@ func (g *Generator) runPlugins(file *FileDescriptor) {
 	g.Write(rem.Bytes())
 
 	// Reformat generated code.
-	fset := token.NewFileSet()
+	fset := token_.NewFileSet()
 	raw := g.Bytes()
 	ast, err := parser.ParseFile(fset, "", g, parser.ParseComments)
 	if err != nil {
@@ -1187,16 +734,61 @@ func (g *Generator) runPlugins(file *FileDescriptor) {
 	if err != nil {
 		g.Fail("generated Go source code could not be reformatted:", err.Error())
 	}
-} */
+}
 
 // Generate the header, including package definition
-// func (g *Generator) generateHeader() {
+func (g *Generator) generateHeader() {
+	g.P("// Code generated by protoc-gen-go.")
+	g.P("// source: ", g.file.Name)
+	g.P("// DO NOT EDIT!")
+	g.P()
+
+	name := g.file.PackageName()
+
+	if g.file.index == 0 {
+		// Generate package docs for the first file in the package.
+		g.P("/*")
+		g.P("Package ", name, " is a generated protocol buffer package.")
+		g.P()
+		if loc, ok := g.file.comments[strconv.Itoa(packagePath)]; ok {
+			// not using g.PrintComments because this is a /* */ comment block.
+			text := strings.TrimSuffix(loc.GetLeadingComments(), "\n")
+			for _, line := range strings.Split(text, "\n") {
+				line = strings.TrimPrefix(line, " ")
+				// ensure we don't escape from the block comment
+				line = strings.Replace(line, "*/", "* /", -1)
+				g.P(line)
+			}
+			g.P()
+		}
+		var topMsgs []string
+		g.P("It is generated from these files:")
+		for _, f := range g.genFiles {
+			g.P("\t", f.Name)
+			for _, msg := range f.desc {
+				if msg.parent != nil {
+					continue
+				}
+				topMsgs = append(topMsgs, CamelCaseSlice(msg.TypeName()))
+			}
+		}
+		g.P()
+		g.P("It has these top-level messages:")
+		for _, msg := range topMsgs {
+			g.P("\t", msg)
+		}
+		g.P("*/")
+	}
+
+	g.P("package ", name)
+	g.P()
+}
 
 // PrintComments prints any comments from the source .proto file.
 // The path is a comma-separated list of integers.
 // It returns an indication of whether any comments were printed.
 // See descriptor.proto for its format.
-/* func (g *Generator) PrintComments(path string) bool {
+func (g *Generator) PrintComments(path string) bool {
 	if !g.writeOutput {
 		return false
 	}
@@ -1222,10 +814,10 @@ func (g *Generator) weak(i int32) bool {
 		}
 	}
 	return false
-} */
+}
 
 // Generate the imports
-/* func (g *Generator) generateImports() {
+func (g *Generator) generateImports() {
 	// We almost always need a proto import.  Rather than computing when we
 	// do, which is tricky when there's a plugin, just import it and
 	// reference it later. The same argument applies to the fmt and math packages.
@@ -1270,9 +862,9 @@ func (g *Generator) weak(i int32) bool {
 	g.P("var _ = ", g.Pkg["fmt"], ".Errorf")
 	g.P("var _ = ", g.Pkg["math"], ".Inf")
 	g.P()
-} */
+}
 
-/* func (g *Generator) generateImported(id *ImportedDescriptor) {
+func (g *Generator) generateImported(id *ImportedDescriptor) {
 	// Don't generate public import symbols for files that we are generating
 	// code for, since those symbols will already be in this package.
 	// We can't simply avoid creating the ImportedDescriptor objects,
@@ -1384,9 +976,9 @@ func (g *Generator) generateEnum(enum *EnumDescriptor) {
 	}
 
 	g.P()
-} */
+}
 
-func genFieldTag(file_desc *descriptor.FileDescriptorProto, field *descriptor.FieldDescriptorProto, wiretype string) string {
+func (g *Generator) goTag(message *Descriptor, field *descriptor.FieldDescriptorProto, wiretype string) string {
 	optrepreq := ""
 	switch {
 	case isOptional(field):
@@ -1412,8 +1004,7 @@ func genFieldTag(file_desc *descriptor.FileDescriptorProto, field *descriptor.Fi
 			// Nothing to do. Quoting is done for the whole tag.
 		case descriptor.FieldDescriptorProto_TYPE_ENUM:
 			// For enums we need to provide the integer constant.
-			panic("tag for enums")
-			/* obj := g.ObjectNamed(field.GetTypeName())
+			obj := g.ObjectNamed(field.GetTypeName())
 			if id, ok := obj.(*ImportedDescriptor); ok {
 				// It is an enum that was publicly imported.
 				// We need the underlying type.
@@ -1427,7 +1018,7 @@ func genFieldTag(file_desc *descriptor.FileDescriptorProto, field *descriptor.Fi
 				}
 				g.Fail("unknown enum type", CamelCaseSlice(obj.TypeName()))
 			}
-			defaultValue = enum.integerValueAsString(defaultValue) */
+			defaultValue = enum.integerValueAsString(defaultValue)
 		}
 		defaultValue = ",def=" + defaultValue
 	}
@@ -1435,8 +1026,7 @@ func genFieldTag(file_desc *descriptor.FileDescriptorProto, field *descriptor.Fi
 	if *field.Type == descriptor.FieldDescriptorProto_TYPE_ENUM {
 		// We avoid using obj.PackageName(), because we want to use the
 		// original (proto-world) package name.
-		panic("tag for enums")
-		/* obj := g.ObjectNamed(field.GetTypeName())
+		obj := g.ObjectNamed(field.GetTypeName())
 		if id, ok := obj.(*ImportedDescriptor); ok {
 			obj = id.o
 		}
@@ -1444,13 +1034,13 @@ func genFieldTag(file_desc *descriptor.FileDescriptorProto, field *descriptor.Fi
 		if pkg := obj.File().GetPackage(); pkg != "" {
 			enum += pkg + "."
 		}
-		enum += CamelCaseSlice(obj.TypeName())*/
+		enum += CamelCaseSlice(obj.TypeName())
 	}
 	packed := ""
 	if (field.Options != nil && field.Options.GetPacked()) ||
 		// Per https://developers.google.com/protocol-buffers/docs/proto3#simple:
 		// "In proto3, repeated fields of scalar numeric types use packed encoding by default."
-		(*file_desc.Syntax == "proto3" && (field.Options == nil || field.Options.Packed == nil) &&
+		(message.proto3() && (field.Options == nil || field.Options.Packed == nil) &&
 			isRepeated(field) && isScalar(field)) {
 		packed = ",packed"
 	}
@@ -1472,7 +1062,7 @@ func genFieldTag(file_desc *descriptor.FileDescriptorProto, field *descriptor.Fi
 		name += ",json=" + json
 	}
 	name = ",name=" + name
-	if *file_desc.Syntax == "proto3" {
+	if message.proto3() {
 		// We only need the extra tag for []byte fields;
 		// no need to add noise for the others.
 		if *field.Type == descriptor.FieldDescriptorProto_TYPE_BYTES {
@@ -1512,7 +1102,7 @@ func needsStar(typ descriptor.FieldDescriptorProto_Type) bool {
 // Otherwise the object is from another package; and the result is the underscored
 // package name followed by the item name.
 // The result always has an initial capital.
-/* func (g *Generator) TypeName(obj Object) string {
+func (g *Generator) TypeName(obj Object) string {
 	return g.DefaultPackageName(obj) + CamelCaseSlice(obj.TypeName())
 }
 
@@ -1520,10 +1110,10 @@ func needsStar(typ descriptor.FieldDescriptorProto_Type) bool {
 // name even if the object is in our own package.
 func (g *Generator) TypeNameWithPackage(obj Object) string {
 	return obj.PackageName() + CamelCaseSlice(obj.TypeName())
-} */
+}
 
 // GoType returns a string representing the type name, and the wire type
-func genFieldType(file_desc *descriptor.FileDescriptorProto, field *descriptor.FieldDescriptorProto) (typ string, wire string) {
+func (g *Generator) GoType(message *Descriptor, field *descriptor.FieldDescriptorProto) (typ string, wire string) {
 	// TODO: Options.
 	switch *field.Type {
 	case descriptor.FieldDescriptorProto_TYPE_DOUBLE:
@@ -1547,19 +1137,16 @@ func genFieldType(file_desc *descriptor.FileDescriptorProto, field *descriptor.F
 	case descriptor.FieldDescriptorProto_TYPE_STRING:
 		typ, wire = "string", "bytes"
 	case descriptor.FieldDescriptorProto_TYPE_GROUP:
-		panic("group")
-		/* desc := g.ObjectNamed(field.GetTypeName())
-		typ, wire = "*"+g.TypeName(desc), "group" */
+		desc := g.ObjectNamed(field.GetTypeName())
+		typ, wire = "*"+g.TypeName(desc), "group"
 	case descriptor.FieldDescriptorProto_TYPE_MESSAGE:
-		panic("submessage")
-		/* desc := g.ObjectNamed(field.GetTypeName())
-		typ, wire = "*"+g.TypeName(desc), "bytes" */
+		desc := g.ObjectNamed(field.GetTypeName())
+		typ, wire = "*"+g.TypeName(desc), "bytes"
 	case descriptor.FieldDescriptorProto_TYPE_BYTES:
 		typ, wire = "[]byte", "bytes"
 	case descriptor.FieldDescriptorProto_TYPE_ENUM:
-		panic("enum")
-		/* desc := g.ObjectNamed(field.GetTypeName())
-		typ, wire = g.TypeName(desc), "varint"*/
+		desc := g.ObjectNamed(field.GetTypeName())
+		typ, wire = g.TypeName(desc), "varint"
 	case descriptor.FieldDescriptorProto_TYPE_SFIXED32:
 		typ, wire = "int32", "fixed32"
 	case descriptor.FieldDescriptorProto_TYPE_SFIXED64:
@@ -1569,13 +1156,13 @@ func genFieldType(file_desc *descriptor.FileDescriptorProto, field *descriptor.F
 	case descriptor.FieldDescriptorProto_TYPE_SINT64:
 		typ, wire = "int64", "zigzag64"
 	default:
-		panic(field.GetName())
+		g.Fail("unknown type for", field.GetName())
 	}
 	if isRepeated(field) {
 		typ = "[]" + typ
-	} else if file_desc != nil && *file_desc.Syntax == "proto3" {
+	} else if message != nil && message.proto3() {
 		return
-	} else if field.OneofIndex != nil && file_desc != nil {
+	} else if field.OneofIndex != nil && message != nil {
 		return
 	} else if needsStar(*field.Type) {
 		typ = "*" + typ
@@ -1583,13 +1170,13 @@ func genFieldType(file_desc *descriptor.FileDescriptorProto, field *descriptor.F
 	return
 }
 
-/* func (g *Generator) RecordTypeUse(t string) {
+func (g *Generator) RecordTypeUse(t string) {
 	if obj, ok := g.typeNameToObject[t]; ok {
 		// Call ObjectNamed to get the true object to record the use.
 		obj = g.ObjectNamed(t)
 		g.usedPackages[obj.PackageName()] = true
 	}
-} */
+}
 
 // Method names that may be generated.  Fields with these names get an
 // underscore appended. Any change to this set is a potential incompatible
@@ -1628,7 +1215,7 @@ var wellKnownTypes = map[string]bool{
 }
 
 // Generate the type and default constant definitions for this Descriptor.
-/* func (g *Generator) generateMessage(message *Descriptor) {
+func (g *Generator) generateMessage(message *Descriptor) {
 	// The full type name
 	typeName := message.TypeName()
 	// The full type name, CamelCased.
@@ -2408,9 +1995,9 @@ var wellKnownTypes = map[string]bool{
 	}
 
 	g.addInitf("%s.RegisterType((*%s)(nil), %q)", g.Pkg["proto"], ccTypeName, fullName)
-}*/
+}
 
-/* func (g *Generator) generateExtension(ext *ExtensionDescriptor) {
+func (g *Generator) generateExtension(ext *ExtensionDescriptor) {
 	ccTypeName := ext.DescName()
 
 	extObj := g.ObjectNamed(*ext.Extendee)
@@ -2469,9 +2056,9 @@ var wellKnownTypes = map[string]bool{
 	}
 
 	g.file.addExport(ext, constOrVarSymbol{ccTypeName, "var", ""})
-} */
+}
 
-/* func (g *Generator) generateInitFunction() {
+func (g *Generator) generateInitFunction() {
 	for _, enum := range g.file.enum {
 		g.generateEnumRegistration(enum)
 	}
@@ -2494,9 +2081,9 @@ var wellKnownTypes = map[string]bool{
 	g.Out()
 	g.P("}")
 	g.init = nil
-} */
+}
 
-/* func (g *Generator) generateFileDescriptor(file *FileDescriptor) {
+func (g *Generator) generateFileDescriptor(file *FileDescriptor) {
 	// Make a copy and trim source_code_info data.
 	// TODO: Trim this more when we know exactly what we need.
 	pb := proto.Clone(file.FileDescriptorProto).(*descriptor.FileDescriptorProto)
@@ -2552,7 +2139,7 @@ func (g *Generator) generateEnumRegistration(enum *EnumDescriptor) {
 
 func (g *Generator) generateExtensionRegistration(ext *ExtensionDescriptor) {
 	g.addInitf("%s.RegisterExtension(%s)", g.Pkg["proto"], ext.DescName())
-}*/
+}
 
 // And now lots of helper functions.
 
