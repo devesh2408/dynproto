@@ -33,8 +33,14 @@ if val2.Elem().FieldByName("A").Int() != 10 || val.Elem().FieldByName("B").Strin
 * proto package copies parts of `protoc-gen-go/generator.go`.
 
 ### Status & concerns:
-* apparently working: proto messages with scalars and strings
-* likely not working: enums and nested protos. Also not sure about repeated fields & maps. (if you want to fix, look at the `panic`s in `proto/generator.go`).
+* working and non-working features:
+	- [x] scalars
+	- [x] strings
+	- [x] nested protos
+	- [x] repeated fields
+	- [ ] enums
+	- [ ] maps
+	- [ ] including other proto files
 * I don't know how to test this project under all build constraints (appengine / JS). I assume it fails for the JS target because of cgo.
 * cgo piece (schemaparser.go) needs review from someone who understands cgo to check for memory leaks
 * haven't done any performance testing. Should be way slower than generated marshal/unmarshal functions.
@@ -42,4 +48,4 @@ if val2.Elem().FieldByName("A").Int() != 10 || val.Elem().FieldByName("B").Strin
 
 ### Future work:
 * I'm evaluating this for use in a larger project. If that moves forward, I plan to clean up this fork and ask the maintainers to merge back my changes.
-* Don't expect this repo to stay functional or up-to-date. If your organization wants to use these features, you should (a) write more tests (b) benchmark and (c) take over the project.
+* Don't expect this repo to stay functional or up-to-date. If your organization wants to use these features, you should take over the project.
