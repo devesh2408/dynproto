@@ -320,8 +320,8 @@ func (g *Generator) WrapTypes() {
 			desc:                descs,
 			enum:                enums,
 			ext:                 exts,
-			// exported:            make(map[Object][]symbol),
-			proto3: fileIsProto3(f),
+			exported:            make(map[Object][]symbol), ////why was it commeted earlier
+			proto3:              fileIsProto3(f),
 		}
 		extractComments(fd)
 		g.allFiles = append(g.allFiles, fd)
@@ -520,9 +520,18 @@ func (g *Generator) BuildTypeNameMap() {
 		for _, enum := range f.enum {
 			name := dottedPkg + dottedSlice(enum.TypeName())
 			g.typeNameToObject[name] = enum
+			/*
+			   TODO hack to be removed later
+			   because of some mismatch in filedescriptorProto we are not able
+			   to get the fully qualified type names for the objects so inserting the type name also in the map.
+			*/
+			name = dottedSlice(enum.TypeName())
+			g.typeNameToObject[name] = enum
 		}
 		for _, desc := range f.desc {
 			name := dottedPkg + dottedSlice(desc.TypeName())
+			g.typeNameToObject[name] = desc
+			name = dottedSlice(desc.TypeName())
 			g.typeNameToObject[name] = desc
 		}
 	}
@@ -708,7 +717,7 @@ func (g *Generator) generate(file *FileDescriptor) {
 	rem := g.Buffer
 	g.Buffer = new(bytes.Buffer)
 	g.generateHeader()
-	g.generateImports()
+	//g.generateImports()
 	if !g.writeOutput {
 		return
 	}
@@ -1114,7 +1123,10 @@ func (g *Generator) TypeNameWithPackage(obj Object) string {
 
 // GoType returns a string representing the type name, and the wire type
 func (g *Generator) GoType(message *Descriptor, field *descriptor.FieldDescriptorProto) (typ string, wire string) {
-	// TODO: Options.
+	if field.Type == nil {
+		g.Fail("FieldDescriptorProto error : Type is nil for Field ", field.GetName())
+		return
+	}
 	switch *field.Type {
 	case descriptor.FieldDescriptorProto_TYPE_DOUBLE:
 		typ, wire = "float64", "fixed64"
