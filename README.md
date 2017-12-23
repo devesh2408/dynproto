@@ -1,6 +1,6 @@
 ## dynproto
 
-This is a fork of github.com/golang/protobuf to add schema parsing & marshaling/unmarshaling of blobs from dynamically parsed schemas.
+This is a fork of github.com/abe-winter/dynproto to add support for enum and include directive in protobuf file.
 
 Use this to parse protos when schemas aren't available at compile-time.
 
@@ -9,8 +9,8 @@ Use this to parse protos when schemas aren't available at compile-time.
 ```golang
 // careful: this is paraphrased from test suite. Never tested as-is.
 
-schema, _ := proto.ParseSchema("syntax = \"proto3\"; message Hello {int32 a = 1; string b = 3;}")
-dyn := proto.DynStruct(&schema)
+schema, _ := proto.ParseMultipleSchema("syntax = \"proto3\"; message Hello {int32 a = 1; string b = 3;}")
+dyn := proto.DynStructTest(&schema)
 
 val := reflect.New(dyn[0]) // dyn[0] i.e. the 0th message in the schema
 val.Elem().FieldByName("A").SetInt(10)
@@ -38,14 +38,13 @@ if val2.Elem().FieldByName("A").Int() != 10 || val.Elem().FieldByName("B").Strin
 	- [x] strings
 	- [x] nested protos
 	- [x] repeated fields
-	- [ ] enums
+	- [x] enums
+	- [x] including other proto files
 	- [ ] maps
-	- [ ] including other proto files
 * I don't know how to test this project under all build constraints (appengine / JS). I assume it fails for the JS target because of cgo.
 * cgo piece (schemaparser.go) needs review from someone who understands cgo to check for memory leaks
 * haven't done any performance testing. Should be way slower than generated marshal/unmarshal functions.
 * security: I don't know if the schema parsing & ser/des code were written with user-provided input in mind. You should pay for a security audit before pointing this at the internet.
 
 ### Future work:
-* I'm evaluating this for use in a larger project. If that moves forward, I plan to clean up this fork and ask the maintainers to merge back my changes.
 * Don't expect this repo to stay functional or up-to-date. If your organization wants to use these features, you should take over the project.
